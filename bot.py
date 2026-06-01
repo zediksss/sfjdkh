@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import os
@@ -8,21 +9,25 @@ import string
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
-from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.error import BadRequest
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
+from aiogram.filters.command import CommandObject
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User,
 )
+from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -38,15 +43,19 @@ BOT_DB_PATH = os.getenv("BOT_DB_PATH", str(BASE_DIR / "bot.sqlite3"))
 
 PASSWORD = "123123"
 DEVICE_LIMIT = 3
+MAX_SUBSCRIPTIONS_PER_USER = 3
 QUOTA_BYTES = 1024**4
 
 IMAGES = {
     "invite": BASE_DIR / "invitecode.png",
     "hello": BASE_DIR / "hello.png",
     "buy": BASE_DIR / "buysub.png",
-    "paid": BASE_DIR / "oplati.png",
+    "payment": BASE_DIR / "oplati.png",
+    "paid": BASE_DIR / "paid.png",
     "subs": BASE_DIR / "mysubs.png",
 }
+
+router = Router()
 
 
 def quote(text: str) -> str:
@@ -111,7 +120,7 @@ def init_db() -> None:
         )
 
 
-def remember_user(user_id: int, username: str | None, invited: bool = False) -> None:
+def remember_user(user_id: int, username: Optional[str], invited: bool = False) -> None:
     with db() as conn:
         conn.execute(
             """
@@ -133,7 +142,7 @@ def user_has_access(user_id: int) -> bool:
         return bool(row and row["invited"])
 
 
-def activate_invite(code: str, user_id: int, username: str | None) -> bool:
+def activate_invite(code: str, user_id: int, username: Optional[str]) -> bool:
     normalized = code.strip().upper()
     with db() as conn:
         row = conn.execute(
@@ -154,68 +163,102 @@ def activate_invite(code: str, user_id: int, username: str | None) -> bool:
         return True
 
 
+def button(text: str, callback_data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=callback_data)
+
+
+def keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def main_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    return keyboard(
         [
-            [InlineKeyboardButton("Купить подписку", callback_data="buy")],
+            [button("🛒 Купить подписку", "buy")],
             [
-                InlineKeyboardButton("Мои подписки", callback_data="subs"),
-                InlineKeyboardButton("Профиль", callback_data="profile"),
+                button("📦 Мои подписки", "subs"),
+                button("👤 Профиль", "profile"),
             ],
         ]
     )
 
 
 def buy_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    return keyboard(
         [
             [
-                InlineKeyboardButton("1 месяц", callback_data="term:1"),
-                InlineKeyboardButton("2 месяца", callback_data="term:2"),
-                InlineKeyboardButton("3 месяца", callback_data="term:3"),
+                button("1️⃣ 1 месяц", "term:1"),
+                button("2️⃣ 2 месяца", "term:2"),
+                button("3️⃣ 3 месяца", "term:3"),
             ],
-            [InlineKeyboardButton("Назад в меню", callback_data="menu")],
+            [button("⬅️ Назад в меню", "menu")],
         ]
     )
 
 
 def back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Вернуться в меню", callback_data="menu")]])
+    return keyboard([[button("🏠 Вернуться в меню", "menu")]])
 
 
-async def delete_message(update: Update) -> None:
-    if update.callback_query and update.callback_query.message:
-        try:
-            await update.callback_query.message.delete()
-        except BadRequest:
-            pass
+def subscription_action_keyboard(sub_url: str, back_callback: str = "menu") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Инструкция по подключению", url=sub_url)],
+            [button("⬅️ Назад в меню", back_callback)],
+        ]
+    )
 
 
-async def send_photo(update: Update, image: str, caption: str, keyboard: InlineKeyboardMarkup | None) -> None:
-    target = update.effective_chat
-    if not target:
+def get_callback_message(query: CallbackQuery) -> Optional[Message]:
+    return query.message if isinstance(query.message, Message) else None
+
+
+async def delete_message(message: Optional[Message]) -> None:
+    if not message:
         return
-    with IMAGES[image].open("rb") as photo:
-        await target.send_photo(
-            photo=photo,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
 
 
-async def show_menu(update: Update) -> None:
-    await send_photo(update, "hello", "", main_keyboard())
+async def send_photo(
+    message: Message,
+    image: str,
+    caption: str,
+    reply_markup: Optional[InlineKeyboardMarkup],
+) -> None:
+    await message.answer_photo(
+        photo=FSInputFile(IMAGES[image]),
+        caption=caption or None,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+    )
 
 
-async def ask_invite(update: Update) -> None:
-    remember_user(update.effective_user.id, update.effective_user.username)
-    await send_photo(update, "invite", quote("Введите код приглашения:"), None)
+async def edit_caption(
+    message: Message,
+    caption: str,
+    reply_markup: Optional[InlineKeyboardMarkup],
+) -> None:
+    try:
+        await message.edit_caption(caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except TelegramBadRequest:
+        pass
+
+
+async def show_menu(message: Message) -> None:
+    await send_photo(message, "hello", "", main_keyboard())
+
+
+async def ask_invite(message: Message, user: User) -> None:
+    remember_user(user.id, user.username)
+    await send_photo(message, "invite", quote("Введите код приглашения:"), None)
 
 
 class HuiApi:
     def __init__(self) -> None:
-        self._token: str | None = None
+        self._token: Optional[str] = None
 
     async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         headers = kwargs.pop("headers", {})
@@ -269,7 +312,7 @@ class HuiApi:
             "/account/pageAccount",
             params={"pageNum": 1, "pageSize": 10, "username": username},
         )
-        accounts = page.get("accountVos") or []
+        accounts = page.get("records") or page.get("accountVos") or []
         account = next((item for item in accounts if item.get("username") == username), None)
         if not account:
             raise RuntimeError("created account not found")
@@ -319,6 +362,15 @@ def store_subscription(telegram_id: int, item: dict[str, Any], months: int) -> N
         )
 
 
+def subscription_count(telegram_id: int) -> int:
+    with db() as conn:
+        row = conn.execute(
+            "select count(*) as total from subscriptions where telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+    return int(row["total"]) if row else 0
+
+
 def format_bytes(value: int) -> str:
     for unit in ("Б", "КБ", "МБ", "ГБ"):
         if value < 1024:
@@ -331,26 +383,31 @@ def format_date(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).strftime("%d.%m.%Y")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_user:
+@router.message(Command("start"))
+async def start(message: Message) -> None:
+    user = message.from_user
+    if not user:
         return
-    remember_user(update.effective_user.id, update.effective_user.username, invited=is_admin(update.effective_user.id))
-    if user_has_access(update.effective_user.id):
-        await show_menu(update)
+    remember_user(user.id, user.username, invited=is_admin(user.id))
+    if user_has_access(user.id):
+        await show_menu(message)
     else:
-        await ask_invite(update)
+        await ask_invite(message, user)
 
 
-async def new_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_user or not is_admin(update.effective_user.id):
+@router.message(Command("newcode", "newkey"))
+async def new_code(message: Message, command: CommandObject) -> None:
+    user = message.from_user
+    if not user or not is_admin(user.id):
         return
-    if len(context.args) != 2 or not context.args[1].isdigit():
-        await update.message.reply_text("Формат: /newcode HELLO 10")
+    args = (command.args or "").split()
+    if len(args) != 2 or not args[1].isdigit():
+        await message.answer("Формат: /newcode HELLO 10")
         return
-    code = context.args[0].strip().upper()
-    uses = int(context.args[1])
+    code = args[0].strip().upper()
+    uses = int(args[1])
     if uses <= 0:
-        await update.message.reply_text("Количество использований должно быть больше 0.")
+        await message.answer("Количество использований должно быть больше 0.")
         return
     with db() as conn:
         conn.execute(
@@ -359,112 +416,137 @@ async def new_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             values (?, ?, ?, ?)
             on conflict(code) do update set uses_left = excluded.uses_left
             """,
-            (code, uses, update.effective_user.id, datetime.now(timezone.utc).isoformat()),
+            (code, uses, user.id, datetime.now(timezone.utc).isoformat()),
         )
-    await update.message.reply_text(f"Код {code} создан. Использований: {uses}")
+    await message.answer(f"Код {html.escape(code)} создан. Использований: {uses}")
 
 
-async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
+@router.message(F.text & ~F.text.startswith("/"))
+async def text_message(message: Message) -> None:
+    user = message.from_user
+    if not user:
         return
-    if user_has_access(update.effective_user.id):
-        await show_menu(update)
+    if user_has_access(user.id):
+        await show_menu(message)
         return
-    if activate_invite(update.message.text or "", update.effective_user.id, update.effective_user.username):
-        await show_menu(update)
+    if activate_invite(message.text or "", user.id, user.username):
+        await show_menu(message)
     else:
-        await update.message.reply_text(quote("Неверный код приглашения."), parse_mode=ParseMode.HTML)
+        await message.answer(quote("Неверный код приглашения."), parse_mode=ParseMode.HTML)
 
 
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not update.effective_user:
-        return
+@router.callback_query()
+async def callback(query: CallbackQuery) -> None:
+    message = get_callback_message(query)
     await query.answer()
-    if not user_has_access(update.effective_user.id):
-        await delete_message(update)
-        await ask_invite(update)
+    if not message:
+        return
+
+    user = query.from_user
+    if not user_has_access(user.id):
+        await delete_message(message)
+        await ask_invite(message, user)
         return
 
     data = query.data or ""
     if data == "menu":
-        await delete_message(update)
-        await show_menu(update)
+        await delete_message(message)
+        await show_menu(message)
     elif data == "buy":
-        await delete_message(update)
+        if subscription_count(user.id) >= MAX_SUBSCRIPTIONS_PER_USER:
+            await query.answer("На один Telegram-аккаунт можно оформить максимум 3 подписки.", show_alert=True)
+            return
+        await delete_message(message)
         caption = "\n".join(
             [
                 "Выберите нужный срок подписки",
                 "",
                 "В каждой подписке можно:",
                 quote("Использовать до 3-х устройств"),
+                quote("Современный протокол Hysteria 2"),
                 quote("Использовать 1 терабайт трафика"),
             ]
         )
-        await send_photo(update, "buy", caption, buy_keyboard())
+        await send_photo(message, "buy", caption, buy_keyboard())
     elif data.startswith("term:"):
-        months = int(data.split(":", 1)[1])
-        await delete_message(update)
-        caption = "Ваша ссылка для оплаты:\n" + quote("временно недоступно")
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Я оплатил", callback_data=f"paid:{months}")]])
-        await send_photo(update, "paid", caption, keyboard)
-    elif data.startswith("paid:"):
-        months = int(data.split(":", 1)[1])
-        await query.edit_message_caption(caption="Создаю подписку...", reply_markup=None)
         try:
-            item = await hui.create_subscription(update.effective_user.id, months)
-            store_subscription(update.effective_user.id, item, months)
+            months = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Некорректный срок подписки.", show_alert=True)
+            return
+        await delete_message(message)
+        caption = "Ваша ссылка для оплаты:\n" + quote("временно недоступно")
+        reply_markup = keyboard([[button("✅ Я оплатил", f"paid:{months}")]])
+        await send_photo(message, "payment", caption, reply_markup)
+    elif data.startswith("paid:"):
+        try:
+            months = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Некорректный срок подписки.", show_alert=True)
+            return
+        if subscription_count(user.id) >= MAX_SUBSCRIPTIONS_PER_USER:
+            await edit_caption(message, "На один Telegram-аккаунт можно оформить максимум 3 подписки.", back_keyboard())
+            return
+        await edit_caption(message, "Создаю подписку...", None)
+        try:
+            item = await hui.create_subscription(user.id, months)
+            store_subscription(user.id, item, months)
         except Exception:
             logging.exception("failed to create subscription")
-            await query.edit_message_caption(
-                caption="Не получилось создать подписку. Напишите администратору.",
-                reply_markup=back_keyboard(),
-            )
+            await edit_caption(message, "Не получилось создать подписку. Напишите администратору.", back_keyboard())
             return
-        caption = "Ваша подписка:\n" + quote_code(item["sub_url"])
-        await query.edit_message_caption(caption=caption, parse_mode=ParseMode.HTML, reply_markup=back_keyboard())
+        caption = "Оплата подтверждена. Ваша подписка:\n" + quote_code(item["sub_url"])
+        await delete_message(message)
+        await send_photo(message, "paid", caption, subscription_action_keyboard(item["sub_url"]))
     elif data == "subs":
-        await delete_message(update)
-        await show_subscriptions(update)
+        await delete_message(message)
+        await show_subscriptions(message, user.id)
     elif data.startswith("sub:"):
-        await delete_message(update)
-        await show_subscription_detail(update, int(data.split(":", 1)[1]))
+        try:
+            sub_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Подписка не найдена.", show_alert=True)
+            return
+        await delete_message(message)
+        await show_subscription_detail(message, user.id, sub_id)
     elif data == "profile":
-        await delete_message(update)
-        keyboard = InlineKeyboardMarkup(
+        await delete_message(message)
+        reply_markup = keyboard(
             [
-                [InlineKeyboardButton("Поддержка", callback_data="support")],
-                [InlineKeyboardButton("Назад в меню", callback_data="menu")],
+                [button("🛟 Поддержка", "support")],
+                [button("⬅️ Назад в меню", "menu")],
             ]
         )
-        await send_photo(update, "hello", f"Ваш ID: <code>{update.effective_user.id}</code>", keyboard)
+        await send_photo(message, "hello", f"Ваш ID: <code>{user.id}</code>", reply_markup)
     elif data == "support":
         await query.answer("Поддержка пока недоступна.", show_alert=True)
 
 
-async def show_subscriptions(update: Update) -> None:
+async def show_subscriptions(message: Message, user_id: int) -> None:
     with db() as conn:
         rows = conn.execute(
             "select id, username, months from subscriptions where telegram_id = ? order by id desc",
-            (update.effective_user.id,),
+            (user_id,),
         ).fetchall()
     if not rows:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Назад в меню", callback_data="menu")]])
-        await send_photo(update, "subs", "У вас пока нет подписок.", keyboard)
+        await send_photo(message, "subs", "У вас пока нет подписок.", back_keyboard())
         return
-    buttons = [[InlineKeyboardButton(f"{row['username']} - {row['months']} мес.", callback_data=f"sub:{row['id']}")] for row in rows]
-    buttons.append([InlineKeyboardButton("Назад в меню", callback_data="menu")])
-    await send_photo(update, "subs", "Ваши подписки:", InlineKeyboardMarkup(buttons))
+    buttons = [
+        [button(f"🔑 {row['username']} · {row['months']} мес.", f"sub:{row['id']}")]
+        for row in rows
+    ]
+    buttons.append([button("⬅️ Назад в меню", "menu")])
+    await send_photo(message, "subs", "Ваши подписки:", keyboard(buttons))
 
 
-async def show_subscription_detail(update: Update, sub_id: int) -> None:
+async def show_subscription_detail(message: Message, user_id: int, sub_id: int) -> None:
     with db() as conn:
         row = conn.execute(
             "select * from subscriptions where id = ? and telegram_id = ?",
-            (sub_id, update.effective_user.id),
+            (sub_id, user_id),
         ).fetchone()
     if not row:
-        await show_subscriptions(update)
+        await show_subscriptions(message, user_id)
         return
     try:
         account = await hui.get_account(row["account_id"])
@@ -480,20 +562,25 @@ async def show_subscription_detail(update: Update, sub_id: int) -> None:
     caption = "\n".join(
         [
             f"Подписка: {html.escape(row['username'])}",
+            f"Ссылка подписки: {quote_code(row['sub_url'])}",
             f"Осталось трафика: {format_bytes(left)}",
             f"Действует до: {format_date(expire_time)}",
         ]
     )
-    await send_photo(update, "subs", caption, InlineKeyboardMarkup([[InlineKeyboardButton("Назад в меню", callback_data="menu")]]))
+    await send_photo(message, "subs", caption, subscription_action_keyboard(row["sub_url"]))
 
 
 def validate_config() -> None:
-    missing = [name for name, value in {
-        "BOT_TOKEN": BOT_TOKEN,
-        "ADMIN_TELEGRAM_ID": ADMIN_TELEGRAM_ID,
-        "HUI_USERNAME": HUI_USERNAME,
-        "HUI_PASSWORD": HUI_PASSWORD,
-    }.items() if not value]
+    missing = [
+        name
+        for name, value in {
+            "BOT_TOKEN": BOT_TOKEN,
+            "ADMIN_TELEGRAM_ID": ADMIN_TELEGRAM_ID,
+            "HUI_USERNAME": HUI_USERNAME,
+            "HUI_PASSWORD": HUI_PASSWORD,
+        }.items()
+        if not value
+    ]
     if missing:
         raise RuntimeError(f"Fill .env values: {', '.join(missing)}")
     for name, path in IMAGES.items():
@@ -501,26 +588,25 @@ def validate_config() -> None:
             raise RuntimeError(f"Image for {name} not found: {path}")
 
 
-async def post_init(app: Application) -> None:
-    await app.bot.set_my_commands(
+async def set_commands(bot: Bot) -> None:
+    await bot.set_my_commands(
         [
-            ("start", "Запустить бота"),
-            ("newcode", "Создать код приглашения"),
+            BotCommand(command="start", description="Запустить бота"),
+            BotCommand(command="newcode", description="Создать код приглашения"),
         ]
     )
 
 
-def main() -> None:
+async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     validate_config()
     init_db()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler(["newcode", "newkey"], new_code))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dispatcher = Dispatcher()
+    dispatcher.include_router(router)
+    await set_commands(bot)
+    await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
