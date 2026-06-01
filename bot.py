@@ -45,6 +45,8 @@ PASSWORD = "123123"
 DEVICE_LIMIT = 3
 MAX_SUBSCRIPTIONS_PER_USER = 3
 QUOTA_BYTES = 1024**4
+PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-06-01-28"
+USER_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-06-01-22"
 
 IMAGES = {
     "invite": BASE_DIR / "invitecode.png",
@@ -53,6 +55,7 @@ IMAGES = {
     "payment": BASE_DIR / "oplati.png",
     "paid": BASE_DIR / "paid.png",
     "subs": BASE_DIR / "mysubs.png",
+    "agreement": BASE_DIR / "soglas.png",
 }
 
 router = Router()
@@ -89,10 +92,14 @@ def init_db() -> None:
                 telegram_id integer primary key,
                 username text,
                 invited integer not null default 0,
+                accepted_terms integer not null default 0,
                 created_at text not null
             )
             """
         )
+        columns = {row["name"] for row in conn.execute("pragma table_info(users)").fetchall()}
+        if "accepted_terms" not in columns:
+            conn.execute("alter table users add column accepted_terms integer not null default 0")
         conn.execute(
             """
             create table if not exists invite_codes (
@@ -120,17 +127,32 @@ def init_db() -> None:
         )
 
 
-def remember_user(user_id: int, username: Optional[str], invited: bool = False) -> None:
+def remember_user(
+    user_id: int,
+    username: Optional[str],
+    invited: bool = False,
+    accepted_terms: Optional[bool] = None,
+) -> None:
     with db() as conn:
         conn.execute(
             """
-            insert into users (telegram_id, username, invited, created_at)
-            values (?, ?, ?, ?)
+            insert into users (telegram_id, username, invited, accepted_terms, created_at)
+            values (?, ?, ?, ?, ?)
             on conflict(telegram_id) do update set
                 username = excluded.username,
-                invited = max(users.invited, excluded.invited)
+                invited = max(users.invited, excluded.invited),
+                accepted_terms = case
+                    when excluded.accepted_terms = 1 then 1
+                    else users.accepted_terms
+                end
             """,
-            (user_id, username or "", 1 if invited else 0, datetime.now(timezone.utc).isoformat()),
+            (
+                user_id,
+                username or "",
+                1 if invited else 0,
+                1 if accepted_terms else 0,
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
 
 
@@ -140,6 +162,14 @@ def user_has_access(user_id: int) -> bool:
     with db() as conn:
         row = conn.execute("select invited from users where telegram_id = ?", (user_id,)).fetchone()
         return bool(row and row["invited"])
+
+
+def user_accepted_terms(user_id: int) -> bool:
+    if is_admin(user_id):
+        return True
+    with db() as conn:
+        row = conn.execute("select accepted_terms from users where telegram_id = ?", (user_id,)).fetchone()
+        return bool(row and row["accepted_terms"])
 
 
 def activate_invite(code: str, user_id: int, username: Optional[str]) -> bool:
@@ -154,9 +184,12 @@ def activate_invite(code: str, user_id: int, username: Optional[str]) -> bool:
         conn.execute("update invite_codes set uses_left = uses_left - 1 where code = ?", (normalized,))
         conn.execute(
             """
-            insert into users (telegram_id, username, invited, created_at)
-            values (?, ?, 1, ?)
-            on conflict(telegram_id) do update set username = excluded.username, invited = 1
+            insert into users (telegram_id, username, invited, accepted_terms, created_at)
+            values (?, ?, 1, 1, ?)
+            on conflict(telegram_id) do update set
+                username = excluded.username,
+                invited = 1,
+                accepted_terms = 1
             """,
             (user_id, username or "", datetime.now(timezone.utc).isoformat()),
         )
@@ -171,6 +204,15 @@ def keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def legal_buttons() -> list[list[InlineKeyboardButton]]:
+    return [
+        [
+            InlineKeyboardButton(text="Политика конфиденциальности", url=PRIVACY_POLICY_URL),
+            InlineKeyboardButton(text="Пользовательское соглашение", url=USER_AGREEMENT_URL),
+        ]
+    ]
+
+
 def main_keyboard() -> InlineKeyboardMarkup:
     return keyboard(
         [
@@ -179,6 +221,16 @@ def main_keyboard() -> InlineKeyboardMarkup:
                 button("📦 Мои подписки", "subs"),
                 button("👤 Профиль", "profile"),
             ],
+            *legal_buttons(),
+        ]
+    )
+
+
+def agreement_keyboard() -> InlineKeyboardMarkup:
+    return keyboard(
+        [
+            *legal_buttons(),
+            [button("✅ Принимаю", "accept_terms")],
         ]
     )
 
@@ -201,8 +253,8 @@ def back_keyboard() -> InlineKeyboardMarkup:
 
 
 def subscription_action_keyboard(sub_url: str, back_callback: str = "menu") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    return keyboard(
+        [
             [InlineKeyboardButton(text="Инструкция по подключению", url=sub_url)],
             [button("⬅️ Назад в меню", back_callback)],
         ]
@@ -251,8 +303,12 @@ async def show_menu(message: Message) -> None:
     await send_photo(message, "hello", "", main_keyboard())
 
 
+async def show_agreement(message: Message) -> None:
+    await send_photo(message, "agreement", "", agreement_keyboard())
+
+
 async def ask_invite(message: Message, user: User) -> None:
-    remember_user(user.id, user.username)
+    remember_user(user.id, user.username, accepted_terms=True)
     await send_photo(message, "invite", quote("Введите код приглашения:"), None)
 
 
@@ -388,11 +444,14 @@ async def start(message: Message) -> None:
     user = message.from_user
     if not user:
         return
-    remember_user(user.id, user.username, invited=is_admin(user.id))
-    if user_has_access(user.id):
-        await show_menu(message)
-    else:
-        await ask_invite(message, user)
+    remember_user(user.id, user.username, invited=is_admin(user.id), accepted_terms=is_admin(user.id))
+    if user_accepted_terms(user.id):
+        if user_has_access(user.id):
+            await show_menu(message)
+        else:
+            await ask_invite(message, user)
+        return
+    await show_agreement(message)
 
 
 @router.message(Command("newcode", "newkey"))
@@ -426,6 +485,9 @@ async def text_message(message: Message) -> None:
     user = message.from_user
     if not user:
         return
+    if not user_accepted_terms(user.id):
+        await show_agreement(message)
+        return
     if user_has_access(user.id):
         await show_menu(message)
         return
@@ -443,12 +505,27 @@ async def callback(query: CallbackQuery) -> None:
         return
 
     user = query.from_user
+    data = query.data or ""
+
+    if data == "accept_terms":
+        remember_user(user.id, user.username, invited=is_admin(user.id), accepted_terms=True)
+        await delete_message(message)
+        if user_has_access(user.id):
+            await show_menu(message)
+        else:
+            await ask_invite(message, user)
+        return
+
+    if not user_accepted_terms(user.id):
+        await delete_message(message)
+        await show_agreement(message)
+        return
+
     if not user_has_access(user.id):
         await delete_message(message)
         await ask_invite(message, user)
         return
 
-    data = query.data or ""
     if data == "menu":
         await delete_message(message)
         await show_menu(message)
