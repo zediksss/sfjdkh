@@ -48,6 +48,11 @@ QUOTA_BYTES = 1024**4
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-06-01-28"
 USER_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-06-01-22"
 SUPPORT_URL = "https://t.me/esenuskoritelsup"
+PLAN_PRICES = {
+    1: 69,
+    2: 129,
+    3: 189,
+}
 
 IMAGES = {
     "invite": BASE_DIR / "invitecode.png",
@@ -236,15 +241,33 @@ def agreement_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def term_label(months: int) -> str:
+    labels = {
+        1: "1 месяц",
+        2: "2 месяца",
+        3: "3 месяца",
+    }
+    return labels.get(months, f"{months} мес.")
+
+
 def buy_keyboard() -> InlineKeyboardMarkup:
     return keyboard(
         [
             [
-                button("1️⃣ 1 месяц", "term:1"),
-                button("2️⃣ 2 месяца", "term:2"),
-                button("3️⃣ 3 месяца", "term:3"),
+                button("1️⃣ 1 месяц • 69р", "term:1"),
+                button("2️⃣ 2 месяца • 129р", "term:2"),
+                button("3️⃣ 3 месяца • 189р", "term:3"),
             ],
             [button("⬅️ Назад в меню", "menu")],
+        ]
+    )
+
+
+def payment_keyboard(months: int) -> InlineKeyboardMarkup:
+    return keyboard(
+        [
+            [button("✅ Я оплатил", f"paid:{months}")],
+            [button("⬅️ Назад", "buy")],
         ]
     )
 
@@ -552,9 +575,21 @@ async def callback(query: CallbackQuery) -> None:
         except ValueError:
             await query.answer("Некорректный срок подписки.", show_alert=True)
             return
+        price = PLAN_PRICES.get(months)
+        if price is None:
+            await query.answer("Тариф не найден.", show_alert=True)
+            return
         await delete_message(message)
-        caption = "Ваша ссылка для оплаты:\n" + quote("временно недоступно")
-        reply_markup = keyboard([[button("✅ Я оплатил", f"paid:{months}")]])
+        caption = "\n".join(
+            [
+                f"Ваш выбор - ускоритель на {term_label(months)}",
+                f"Стоимость {price} руб. ({round(price / months)}р/мес.)",
+                "",
+                "Ваша ссылка для оплаты:",
+                quote("временно недоступно"),
+            ]
+        )
+        reply_markup = payment_keyboard(months)
         await send_photo(message, "payment", caption, reply_markup)
     elif data.startswith("paid:"):
         try:
