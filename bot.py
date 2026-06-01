@@ -47,6 +47,7 @@ MAX_SUBSCRIPTIONS_PER_USER = 3
 QUOTA_BYTES = 1024**4
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-06-01-28"
 USER_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-06-01-22"
+SUPPORT_URL = "https://t.me/esenuskoritelsup"
 
 IMAGES = {
     "invite": BASE_DIR / "invitecode.png",
@@ -590,7 +591,7 @@ async def callback(query: CallbackQuery) -> None:
         await delete_message(message)
         reply_markup = keyboard(
             [
-                [button("🛟 Поддержка", "support")],
+                [InlineKeyboardButton(text="🛟 Поддержка", url=SUPPORT_URL)],
                 [button("⬅️ Назад в меню", "menu")],
             ]
         )
