@@ -482,10 +482,24 @@ def subscription_action_keyboard(sub_id: int, sub_url: str, auto_renew: bool) ->
     renew_action = "off" if auto_renew else "on"
     return keyboard(
         [
-            [InlineKeyboardButton(text="🔗 Открыть подписку", url=sub_url)],
+            [InlineKeyboardButton(text="🔗 Инструкция по подключению", url=sub_url)],
+            [button("📆 Продлить", f"extend:{sub_id}")],
             [button(renew_label, f"renew:{sub_id}:{renew_action}")],
             [button("🗑️ Удалить подписку", f"delete_sub:{sub_id}")],
             [button("🔙 Назад к подпискам", "subs")],
+        ]
+    )
+
+
+def extend_subscription_keyboard(sub_id: int) -> InlineKeyboardMarkup:
+    return keyboard(
+        [
+            [
+                button("1️⃣ 1 мес.", f"extend_term:{sub_id}:1"),
+                button("2️⃣ 2 мес.", f"extend_term:{sub_id}:2"),
+                button("3️⃣ 3 мес.", f"extend_term:{sub_id}:3"),
+            ],
+            [button("🔙 Назад к подписке", f"sub:{sub_id}")],
         ]
     )
 
@@ -1111,6 +1125,37 @@ async def try_auto_renew_subscription(bot: Bot, row: sqlite3.Row) -> bool:
     return True
 
 
+async def extend_subscription_from_balance(sub_id: int, user_id: int, months: int) -> tuple[bool, str]:
+    row = get_subscription(sub_id, user_id)
+    if not row or not row["active"]:
+        return False, "Подписка не найдена."
+    if row["is_trial"]:
+        return False, "Тестовый ключ продлить нельзя."
+    price = PLAN_PRICES.get(months)
+    if not price:
+        return False, "Тариф не найден."
+    if get_user_balance(user_id) < price:
+        return False, f"Недостаточно средств на балансе. Нужно {format_money(price)} руб."
+    base_expire = max(int(row["expire_time"]), now_ms())
+    new_expire = base_expire + int(timedelta(days=30 * months).total_seconds() * 1000)
+    try:
+        await hui.update_account_expire(
+            account_id=int(row["account_id"]),
+            username=str(row["username"]),
+            quota=int(row["quota"]),
+            expire_time=new_expire,
+            con_pass=row["con_pass"],
+            remark=f"tg:{row['telegram_id']}",
+        )
+    except Exception:
+        logging.exception("failed to extend subscription %s", sub_id)
+        return False, "Не получилось продлить подписку на панели."
+    if not consume_user_balance(user_id, float(price)):
+        return False, "Не удалось списать деньги с баланса."
+    renew_subscription_record(sub_id, new_expire)
+    return True, f"Подписка продлена на {term_label(months)}. Списано {format_money(price)} руб."
+
+
 async def process_subscription_events(bot: Bot) -> None:
     current_ms = now_ms()
     one_day_ms = 24 * 60 * 60 * 1000
@@ -1269,10 +1314,10 @@ async def show_buy_screen_with_promo(message: Message, promo_code: Optional[str]
         [
             "Выберите нужный срок подписки",
             "",
-            "В каждой подписке можно:",
-            quote("Использовать до 3-х устройств"),
-            quote("Современный протокол Hysteria 2"),
-            quote("Использовать 1 терабайт трафика"),
+            "В каждой подписке:",
+            quote("Можно использовать до 3-х устройств"),
+            quote("Используется современный протокол Hysteria 2"),
+            quote("Включен 1 терабайт трафика"),
         ]
     )
     viewer_id = message.from_user.id if message.from_user else message.chat.id
@@ -1576,6 +1621,54 @@ async def callback(query: CallbackQuery) -> None:
         await query.answer()
         await delete_message(message)
         await show_subscription_detail(message, user.id, sub_id)
+        return
+
+    if data.startswith("extend:") and not data.startswith("extend_term:"):
+        try:
+            sub_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Подписка не найдена.", show_alert=True)
+            return
+        row = get_subscription(sub_id, user.id)
+        if not row:
+            await query.answer("Подписка не найдена.", show_alert=True)
+            return
+        if row["is_trial"]:
+            await query.answer("Тестовый ключ продлить нельзя.", show_alert=True)
+            return
+        await query.answer()
+        await delete_message(message)
+        caption = "\n".join(
+            [
+                f"Продление подписки: <b>{html.escape(str(row['username']))}</b>",
+                f"Баланс: <b>{format_money(get_user_balance(user.id))} руб.</b>",
+                "Выберите срок продления:",
+                "1 месяц - 69 руб.",
+                "2 месяца - 129 руб.",
+                "3 месяца - 189 руб.",
+            ]
+        )
+        await send_photo(message, "payment", caption, extend_subscription_keyboard(sub_id))
+        return
+
+    if data.startswith("extend_term:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await query.answer("Некорректное действие.", show_alert=True)
+            return
+        try:
+            sub_id = int(parts[1])
+            months = int(parts[2])
+        except ValueError:
+            await query.answer("Некорректное действие.", show_alert=True)
+            return
+        success, text = await extend_subscription_from_balance(sub_id, user.id, months)
+        if not success:
+            await query.answer(text, show_alert=True)
+            return
+        await query.answer("Подписка продлена.")
+        await delete_message(message)
+        await send_photo(message, "paid", text, keyboard([[button("🔑 К подписке", f"sub:{sub_id}")], [button("🏠 Назад в меню", "menu")]]))
         return
 
     if data.startswith("renew:"):
