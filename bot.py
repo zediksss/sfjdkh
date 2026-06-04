@@ -397,8 +397,8 @@ def keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 def legal_buttons() -> list[list[InlineKeyboardButton]]:
     return [
         [
-            InlineKeyboardButton(text="Политика конфиденциальности", url=PRIVACY_POLICY_URL),
-            InlineKeyboardButton(text="Пользовательское соглашение", url=USER_AGREEMENT_URL),
+            InlineKeyboardButton(text="📄 Политика конфиденциальности", url=PRIVACY_POLICY_URL),
+            InlineKeyboardButton(text="📝 Пользовательское соглашение", url=USER_AGREEMENT_URL),
         ]
     ]
 
@@ -406,8 +406,8 @@ def legal_buttons() -> list[list[InlineKeyboardButton]]:
 def main_keyboard() -> InlineKeyboardMarkup:
     return keyboard(
         [
-            [button("Купить подписку", "buy")],
-            [button("Мои подписки", "subs"), button("Профиль", "profile")],
+            [button("🛒 Купить подписку", "buy")],
+            [button("🔑 Мои подписки", "subs"), button("👤 Профиль", "profile")],
             *legal_buttons(),
         ]
     )
@@ -417,7 +417,7 @@ def agreement_keyboard() -> InlineKeyboardMarkup:
     return keyboard(
         [
             *legal_buttons(),
-            [button("Принимаю", "accept_terms")],
+            [button("✅ Принимаю", "accept_terms")],
         ]
     )
 
@@ -426,9 +426,9 @@ def profile_keyboard() -> InlineKeyboardMarkup:
     return keyboard(
         [
             [button("🎁 Протестировать сервис", "trial")],
-            [button("Пополнить баланс", "balance_topup")],
-            [InlineKeyboardButton(text="Поддержка", url=SUPPORT_URL)],
-            [button("Назад в меню", "menu")],
+            [button("💳 Пополнить баланс", "balance_topup")],
+            [InlineKeyboardButton(text="🛟 Поддержка", url=SUPPORT_URL)],
+            [button("🏠 Назад в меню", "menu")],
         ]
     )
 
@@ -438,17 +438,17 @@ def buy_keyboard() -> InlineKeyboardMarkup:
 
 
 def buy_keyboard_with_promo(promo_code: Optional[str] = None) -> InlineKeyboardMarkup:
-    promo_label = f"Промокод: {promo_code}" if promo_code else "У меня есть промокод"
+    promo_label = f"🏷️ Промокод: {promo_code}" if promo_code else "🏷️ У меня есть промокод"
     promo_action = "promo_applied" if promo_code else "promo_enter"
     return keyboard(
         [
             [
-                button("1 мес. • 69р", "term:1"),
-                button("2 мес. • 129р", "term:2"),
-                button("3 мес. • 189р", "term:3"),
+                button("1️⃣ 1 мес. • 69р", "term:1"),
+                button("2️⃣ 2 мес. • 129р", "term:2"),
+                button("3️⃣ 3 мес. • 189р", "term:3"),
             ],
             [button(promo_label, promo_action)],
-            [button("Назад в меню", "menu")],
+            [button("🏠 Назад в меню", "menu")],
         ]
     )
 
@@ -456,9 +456,9 @@ def buy_keyboard_with_promo(promo_code: Optional[str] = None) -> InlineKeyboardM
 def payment_link_keyboard(payment_url: str, transaction_id: str) -> InlineKeyboardMarkup:
     return keyboard(
         [
-            [InlineKeyboardButton(text="Перейти к оплате", url=payment_url)],
-            [button("Я оплатил", f"paid:{transaction_id}")],
-            [button("Назад в меню", "menu")],
+            [InlineKeyboardButton(text="💸 Перейти к оплате", url=payment_url)],
+            [button("✅ Я оплатил", f"paid:{transaction_id}")],
+            [button("🏠 Назад в меню", "menu")],
         ]
     )
 
@@ -466,26 +466,26 @@ def payment_link_keyboard(payment_url: str, transaction_id: str) -> InlineKeyboa
 def topup_keyboard() -> InlineKeyboardMarkup:
     return keyboard(
         [
-            [button("10р", "topup:10"), button("50р", "topup:50"), button("100р", "topup:100")],
-            [button("300р", "topup:300"), button("Ввести сумму", "topup_manual")],
-            [button("Назад в профиль", "profile")],
+            [button("💵 10р", "topup:10"), button("💵 50р", "topup:50"), button("💵 100р", "topup:100")],
+            [button("💵 300р", "topup:300"), button("⌨️ Ввести сумму", "topup_manual")],
+            [button("👤 Назад в профиль", "profile")],
         ]
     )
 
 
 def back_keyboard() -> InlineKeyboardMarkup:
-    return keyboard([[button("Вернуться в меню", "menu")]])
+    return keyboard([[button("🏠 Вернуться в меню", "menu")]])
 
 
 def subscription_action_keyboard(sub_id: int, sub_url: str, auto_renew: bool) -> InlineKeyboardMarkup:
-    renew_label = "Выключить автопродление" if auto_renew else "Включить автопродление"
+    renew_label = "⏸️ Выключить автопродление" if auto_renew else "▶️ Включить автопродление"
     renew_action = "off" if auto_renew else "on"
     return keyboard(
         [
-            [InlineKeyboardButton(text="Открыть подписку", url=sub_url)],
+            [InlineKeyboardButton(text="🔗 Открыть подписку", url=sub_url)],
             [button(renew_label, f"renew:{sub_id}:{renew_action}")],
-            [button("Удалить подписку", f"delete_sub:{sub_id}")],
-            [button("Назад к подпискам", "subs")],
+            [button("🗑️ Удалить подписку", f"delete_sub:{sub_id}")],
+            [button("🔙 Назад к подпискам", "subs")],
         ]
     )
 
@@ -493,8 +493,8 @@ def subscription_action_keyboard(sub_id: int, sub_url: str, auto_renew: bool) ->
 def delete_subscription_confirm_keyboard(sub_id: int) -> InlineKeyboardMarkup:
     return keyboard(
         [
-            [button("Подтвердить", f"delete_sub_confirm:{sub_id}")],
-            [button("Отменить", f"sub:{sub_id}")],
+            [button("✅ Подтвердить", f"delete_sub_confirm:{sub_id}")],
+            [button("❌ Отменить", f"sub:{sub_id}")],
         ]
     )
 
@@ -1323,8 +1323,8 @@ async def show_subscriptions(message: Message, user_id: int) -> None:
     if not rows:
         await send_photo(message, "subs", "У вас пока нет подписок.", back_keyboard())
         return
-    buttons = [[button(f"{row['username']} · {row['months']} мес.", f"sub:{row['id']}")] for row in rows]
-    buttons.append([button("Назад в меню", "menu")])
+    buttons = [[button(f"🔑 {row['username']} · {row['months']} мес.", f"sub:{row['id']}")] for row in rows]
+    buttons.append([button("🏠 Назад в меню", "menu")])
     await send_photo(message, "subs", "Ваши подписки:", keyboard(buttons))
 
 
